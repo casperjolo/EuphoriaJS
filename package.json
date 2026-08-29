@@ -1,0 +1,15 @@
+{
+  "name": "euphoriajs",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "NaturalMotion Euphoria-inspired procedural locomotion in Three.js",
+  "license": "MIT",
+  "scripts": {
+    "start": "npx serve -l 5173 --no-clipboard -c serve.json .",
+    "test": "node tests/run.mjs"
+  },
+  "devDependencies": {
+    "three": "0.168.0"
+  }
+}
