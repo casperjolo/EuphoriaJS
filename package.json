@@ -7,7 +7,8 @@
   "license": "MIT",
   "scripts": {
     "start": "npx serve -l 5173 --no-clipboard -c serve.json .",
-    "test": "node tests/run.mjs"
+    "test": "node tests/run.mjs",
+    "clips": "node tools/clip-manifest.mjs"
   },
   "devDependencies": {
     "three": "0.168.0"

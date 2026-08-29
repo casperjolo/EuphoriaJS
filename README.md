@@ -4,11 +4,16 @@
 <img width="2172" height="724" alt="image" src="https://github.com/user-attachments/assets/ef93884c-5337-4433-9c8c-276eec68f5c5" />
 
 
-GTA IV-styled third-person locomotion in Three.js: motion matching, procedural
-two-bone IK, and foot planting over deformable terrain — plus a second animation
-layer and a set of procedural behaviours that react to the room: he looks where
-you look, leans into acceleration, gets restless when you leave him standing, and
-puts his hands on a wall instead of walking through it.
+GTA IV-styled third-person locomotion in Three.js: motion matching over a
+library of 120 measured NaturalMotion mannequin clips (walk, run, sprint,
+crouch in eleven directions, full jump and crouch phase machines, idle breaks),
+procedural two-bone IK, and foot planting over deformable terrain — plus a
+second animation layer and a set of procedural behaviours that react to the
+room: he looks where you look, leans into acceleration, gets restless when you
+leave him standing, and puts his hands on a wall instead of walking through it.
+
+How the matcher works, the clip-library convention, and the workflow for adding
+clips are documented in [`docs/MotionMatching.md`](docs/MotionMatching.md).
 
 ## Running
 
@@ -27,21 +32,27 @@ Then open <http://localhost:5173>.
 | `W` `A` `S` `D` / arrows | Move (camera-relative) |
 | `Shift` | Sprint |
 | `Space` | Jump |
+| `C` | Crouch (toggle; buffered while airborne) |
 | Mouse | Over-the-shoulder look (click to lock the pointer) |
 | `1` `2` `3` `4` | Toggle look-at / idle layer / wall hands / body lean |
 | `B` | Dump bone names to the console |
+| `D` | Dump the matcher's current query costs to the console |
 
 Walk into the grey wall ahead of the spawn and stop: the hands come up onto it.
-Leave him alone for five seconds and he starts looking around; a few seconds
-later he folds his arms.
+Leave him alone for five seconds and he starts looking around; a little later
+he folds his arms, and after the settle he begins working through full-body
+idle breaks. Crouch at a run, jump at a sprint, or fall off the tall block and
+the landing picks its take by how fast and how far you came down.
 
 ## Architecture
 
 | File | Role |
 | --- | --- |
 | [`js/main.js`](js/main.js) | Bootstrap, asset loading, frame loop |
-| [`js/Retargeting.js`](js/Retargeting.js) | Bakes the source FBX rig onto Fred's skeleton |
-| [`js/AnimationDatabase.js`](js/AnimationDatabase.js) | Clip manifest, FBX loading, retarget pass |
+| [`js/ClipLibrary.js`](js/ClipLibrary.js) | Generated clip manifest: every playable clip with its measured features |
+| [`js/Retargeting.js`](js/Retargeting.js) | Rest-delta retargeter; bakes each clip onto Fred's skeleton, incl. pelvis bob |
+| [`js/AnimationDatabase.js`](js/AnimationDatabase.js) | Loads the manifest's clips, runs the retarget pass |
+| `tools/clip-manifest.mjs` | Scans `Animations/`, classifies and measures every clip, emits the manifest (`npm run clips`) |
 | [`js/MotionMatching.js`](js/MotionMatching.js) | Locomotion layer: picks the best clip for the current velocity |
 | [`js/MotionSelector.js`](js/MotionSelector.js) | Feature query shared by both layers: cost, hysteresis, dwell, boredom |
 | [`js/TransitionBlender.js`](js/TransitionBlender.js) | Eased crossfades, gait-phase continuity, layer master weight |
@@ -67,14 +78,15 @@ later he folds his arms.
 The animation library and the character do not share a skeleton, and the
 mismatch runs deeper than bone names:
 
-| | Source (`Animations/*.fbx`) | Target (`Fred.glb`) |
+| | Source (`Animations/*.fbx`, UEFN mannequin) | Target (`Fred.glb`) |
 | --- | --- | --- |
-| Naming | `B-thighL` (Blender) | `SKEL_L_Thigh_01` (RAGE) |
+| Naming | `thigh_l` | `SKEL_L_Thigh_01` (RAGE) |
 | Up axis | `+Z` | `+Y` |
 | Units | centimetres | metres |
-| Rest pose | T-pose | arms down |
+| Rest pose | A-pose | arms down |
 
-`Retargeting.js` resolves all four at load time. A global rotation `A` is
+`Retargeting.js` resolves all four at load time, measuring the frame
+alignment from the rigs' own rest geometry rather than assuming it. A global rotation `A` is
 measured from each rig's own geometry — "up" runs hips→head, "left" runs
 right-thigh→left-thigh — which holds for any humanoid and makes units cancel.
 Animation is then carried across as a world-space delta from the source's rest
@@ -105,9 +117,17 @@ markers hanging straight down from the ankle, roughly `(0, -0.099, 0.008)`, not
 toe joints — the source rig's real toes point mostly forward. Treating them as a
 bone direction aligns "down" onto "forward" and torques the whole foot.
 
-Only quaternion tracks are emitted, so the centimetre/metre scale difference
-never reaches the target. Everything is baked into ordinary `AnimationClip`s, so
-runtime cost is the same as any other clip.
+Horizontal root motion is dropped (the controller owns position), but the
+pelvis *vertical* is kept: the gait bob and the crouch depth live in the root's
+position, so they are baked as a position track on `SKEL_Pelvis_00`, relative
+to a reference height pinned to the standing idle loop. Per role, jump
+take-offs and landings are clamped to *lowering only* (the rise and the
+airtime belong to physics; the squat and the impact dip are real), and the
+falling clip gets no track at all. `FootPlanting` reads whatever the mixer
+wrote before adding its slope correction, so the two never fight.
+
+Everything is baked into ordinary `AnimationClip`s at load time, so runtime
+cost is the same as any other clip.
 
 ### Facing convention
 
@@ -129,10 +149,26 @@ the ground, is never asked to twist the legs against those locks.
 
 ### Motion matching
 
-Each clip is tagged with a feature vector — local velocity direction `(vx, vz)`
-plus a speed tier (idle/walk/run/sprint). The query runs at ~12 Hz and picks the
-minimum-cost clip by weighted distance, then crossfades. Jump states bypass the
-query and drive the clip directly.
+Each clip is tagged with the features the manifest measured from its own root
+motion — body-frame velocity direction `(vx, vz)` plus speed — and a tier gate
+(idle/walk/run/sprint/crouch). The query runs at ~12 Hz and picks the
+minimum-cost clip by weighted distance, then crossfades. Speed *within* a tier
+is continuous: the winner is time-scaled to the exact current speed, so
+accelerating never waits for a gait swap, while tier boundaries stay hard
+because a sprint gait at walking speed reads as slow motion.
+
+The feature space is the body's own frame, and the body only turns while moving
+to face its travel direction. In steady state the local velocity is straight
+ahead and the forward loops win; a turn sweeps the velocity through the whole
+circle, and the matcher rides the diagonal and strafe loops for the duration
+of the turn. That is what replaces a direction state machine entirely.
+
+One-shots bypass the query. Jumps run a phase machine (`begin` → `air` →
+`land`) whose take-off and landing are themselves small matchers over the
+measured library: speed class × travel quadrant × foot, with rolls for long
+falls and stumbles for sprint-speed landings. Crouch is a toggle that plays the
+measured enter/exit one-shots and then hands off to a full tier of crouch
+loops, at a crouch speed cap matched to their measured gait.
 
 A per-frame query is unstable in a way that is easy to miss: a strafe held at
 exactly 45° sits on the boundary between two clips, so the matcher alternates
@@ -163,14 +199,18 @@ The layer is driven by its own matcher (`IdleDirector`) over a small feature
 space — how long he has been still, whether he is moving, whether there is
 something in front of him worth touching. What makes a long idle vary is
 **boredom**: a candidate accrues cost while it is active and sheds it while it is
-not, so the same five features produce a different order every time. He talks,
-then folds his arms, then goes back to watching the room, with no scripted
-sequence anywhere.
+not, so the same features produce a different order every time. He works
+through a full-body idle break, then folds his arms, then goes back to watching
+the room, with no scripted sequence anywhere.
 
-The one social take in the library is a clip; the folded arms are *solved*,
-because no such clip exists. Both come out of the same query, so they cannot
-fight. Fred has no finger bones — 27 bones, terminating at `SKEL_*_Hand_end_*` —
-so a hand is posed as a unit and there is no finer detail to get wrong.
+The breaks are the library's full-body idle takes (six standing, five
+crouched), measured to be pelvis-static and pose-cyclic so they loop cleanly on
+the masked layer; a take is a one-shot, so once the matcher offers it the
+director owns it for its duration rather than letting the query flip the layer
+in and out mid-take. The crossed arms and the wall hands are *solved*, because
+no such clips exist. All of it comes out of the same query, so it cannot fight.
+Fred has no finger bones — 27 bones, terminating at `SKEL_*_Hand_end_*` — so a
+hand is posed as a unit and there is no finer detail to get wrong.
 
 ### Procedural pose
 
@@ -275,10 +315,18 @@ production.
 
 What that catches is wiring, not just logic. `node --check` passes on a module
 that calls a function it never imported, and that mistake shipped once in
-`FootPlanting` before the pipeline test existed; the suite now constructs every
-system and simulates frames through the whole stack — ten seconds of idle, a
-walk into the wall, a jump — asserting on bone quaternions, clip selection and
-where the hands actually end up.
+`FootPlanting` before the pipeline test existed; the pipeline suite now
+constructs every system and simulates frames through the whole stack — thirty
+seconds of idle (breaks and crossed arms), a walk into the wall, a jump, a
+crouch enter/exit at capped speed, and the landing matcher — asserting on bone
+quaternions, clip selection and where the hands actually end up.
+
+When the clip library changes, regenerate the manifest first:
+
+```bash
+npm run clips    # scans Animations/, measures, emits js/ClipLibrary.js
+npm test
+```
 
 ## Assets
 

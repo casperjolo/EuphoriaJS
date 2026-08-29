@@ -5,11 +5,18 @@ import { damp, lerpAngle } from './AnimationSmoothing.js';
 const WALK_SPEED   = 2.4;  // m/s
 const RUN_SPEED    = 4.4;
 const SPRINT_SPEED = 7.2;
+const CROUCH_SPEED = 2.0;  // m/s cap while crouched (matches the crouch loops' measured gait)
 const ACCEL        = 12.0; // m/s² ground acceleration
 const DECEL        = 18.0; // deceleration when no input
 const GRAVITY      = -14.0;
 const JUMP_IMPULSE =  6.5;
 const GROUND_SNAP  =  0.35; // m — treat gaps smaller than this as still grounded
+
+// Jump phase durations — tuned against the measured take-off/landing clips:
+// the take-off squat occupies the first ~0.35 s of a Start clip and the
+// landing recovery reads best over ~0.75 s before the query re-takes over.
+const BEGIN_PHASE = 0.35;
+const LAND_PHASE  = 0.75;
 
 // GTA IV locomotion turns the whole body to face the direction of travel rather
 // than strafing. _bodyYaw is that facing angle in the +Z-forward convention, so
@@ -49,6 +56,16 @@ export class CharacterController {
     // Body yaw (world)
     this._bodyYaw   = 0;
 
+    // Crouch (toggled, not held — like the game it imitates). Toggling in the
+    // air is buffered and applied on landing, because the crouch transition
+    // clip is a grounded one-shot.
+    this.crouching      = false;
+    this._pendingCrouch = false;
+
+    // Time spent in the 'air' phase — the landing matcher uses it to decide
+    // between a normal landing and a roll.
+    this.airTime = 0;
+
     // Seconds spent standing still with no input — drives the idle director.
     this.idleTime = 0;
     this.hasInput = false;
@@ -73,8 +90,17 @@ export class CharacterController {
   }
 
   _setupInput() {
-    window.addEventListener('keydown', e => { this._keys[e.code] = true; });
+    window.addEventListener('keydown', e => {
+      this._keys[e.code] = true;
+      if (e.code === 'KeyC' && !e.repeat) this._requestCrouchToggle();
+    });
     window.addEventListener('keyup',   e => { this._keys[e.code] = false; });
+  }
+
+  /** Toggle the crouch, or buffer it if airborne. */
+  _requestCrouchToggle() {
+    if (this.onGround) this.crouching = !this.crouching;
+    else               this._pendingCrouch = true;
   }
 
   _key(...codes) { return codes.some(c => this._keys[c]); }
@@ -113,8 +139,9 @@ export class CharacterController {
     // ── Target speed ─────────────────────────────────────────────────────────
     let targetSpeed = 0;
     if (hasInput) {
-      if (isSprinting) targetSpeed = SPRINT_SPEED;
-      else             targetSpeed = this._key('KeyW','ArrowUp') || this._key('KeyS','ArrowDown') ? RUN_SPEED : WALK_SPEED;
+      if (this.crouching) targetSpeed = CROUCH_SPEED;
+      else if (isSprinting) targetSpeed = SPRINT_SPEED;
+      else                  targetSpeed = this._key('KeyW','ArrowUp') || this._key('KeyS','ArrowDown') ? RUN_SPEED : WALK_SPEED;
     }
 
     // ── Ground movement ───────────────────────────────────────────────────────
@@ -154,6 +181,7 @@ export class CharacterController {
         this.jumping     = true;
         this.jumpPhase   = 'begin';
         this._jumpTimer  = 0;
+        this.airTime     = 0;
       }
     }
 
@@ -195,6 +223,10 @@ export class CharacterController {
     if (gap <= 0) {
       this.mesh.position.y = groundY;
       if (this.velocity.y < 0) this.velocity.y = 0;
+      if (!this.onGround && this._pendingCrouch) {
+        this.crouching = !this.crouching;
+        this._pendingCrouch = false;
+      }
       this.onGround = true;
     } else if (!this.jumping && this.velocity.y <= 0 && gap < GROUND_SNAP) {
       this.mesh.position.y = groundY;   // stick to slopes
@@ -212,10 +244,12 @@ export class CharacterController {
       this._jumpTimer = 0;
       this.jumping    = false;
     }
-    if (this.jumpPhase === 'begin' && this._jumpTimer > 0.25) {
+    if (this.jumpPhase === 'air') this.airTime += dt;
+
+    if (this.jumpPhase === 'begin' && this._jumpTimer > BEGIN_PHASE) {
       this.jumpPhase = 'air'; this._jumpTimer = 0;
     }
-    if (this.jumpPhase === 'land' && this._jumpTimer > 0.45) {
+    if (this.jumpPhase === 'land' && this._jumpTimer > LAND_PHASE) {
       this.jumpPhase = 'none';
     }
     // Walking off a real ledge (not a bump) also reads as airborne
@@ -260,6 +294,8 @@ export class CharacterController {
       jumpPhase: this.jumpPhase,
       idleTime: this.idleTime,
       hasInput,
+      crouching: this.crouching,
+      airTime: this.airTime,
       accelForward: this.accelForward,
       accelLateral: this.accelLateral,
       contactNormal: this.contactNormal,

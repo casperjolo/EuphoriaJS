@@ -182,8 +182,13 @@ export class FootPlanting {
 
     this._pelvisOffset += (target - this._pelvisOffset) * Math.min(1, dt * this.PELVIS_RATE);
 
-    // Absolute assignment — not `+=` — so this can never accumulate.
-    hips.position.y = this._hipsRestY + this._pelvisOffset + this.pelvisExtra;
+    // The mixer may have written a pelvis height this frame (the retargeted
+    // clips carry the gait bob and the crouch depth as a position track), so
+    // the correction is added ON TOP of whatever the animation set — reading
+    // it first, never overwriting it. With no position track the mixer leaves
+    // the bind value and this degenerates to the old rest-based behaviour.
+    const animY = hips.position.y;
+    hips.position.y = animY + this._pelvisOffset + this.pelvisExtra;
     hips.updateWorldMatrix(false, true);
   }
 
