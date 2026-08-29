@@ -397,6 +397,7 @@ describe('module surface', it => {
       './ArmPoses.js':          ['ArmPoses'],
       './BodyLean.js':          ['BodyLean'],
       './CharacterController.js': ['CharacterController'],
+      './ClipLibrary.js':       ['CLIP_LIBRARY'],
       './Environment.js':       ['Environment', 'BoxCollider'],
       './FootPlanting.js':      ['FootPlanting'],
       './GTACamera.js':         ['GTACamera'],

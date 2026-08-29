@@ -1,0 +1,46 @@
+import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
+import * as THREE from 'three';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+const ROOT = '/home/user/EuphoriaJS';
+globalThis.self = globalThis;
+globalThis.URL.createObjectURL ??= () => 'b';
+globalThis.URL.revokeObjectURL ??= () => {};
+globalThis.ProgressEvent ??= class { constructor(t, i={}) { this.type=t; this.loaded=i.loaded??0; this.total=i.total??0; } };
+const server = http.createServer((req, res) => {
+  const rel = decodeURIComponent(req.url.split('?')[0]).replace(/^\/+/, '');
+  const file = path.join(ROOT, rel);
+  if (!fs.existsSync(file)) { res.writeHead(404); res.end(); return; }
+  res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
+  fs.createReadStream(file).pipe(res);
+});
+await new Promise(r => server.listen(0, '127.0.0.1', r));
+const base = `http://127.0.0.1:${server.address().port}/`;
+const RR = globalThis.Request;
+globalThis.Request = class extends RR { constructor(i, init) { super(typeof i === 'string' ? new URL(i, base).href : i, init); } };
+
+const obj = await new Promise((res, rej) => new FBXLoader().load('Animations/Idle/M_Neutral_Stand_Idle_Loop.FBX', res, undefined, rej));
+const clip = obj.animations[0];
+const mixer = new THREE.AnimationMixer(obj);
+mixer.clipAction(clip).play();
+mixer.setTime(0);
+obj.updateMatrixWorld(true);
+const get = n => obj.getObjectByName(n);
+const wp = n => new THREE.Vector3().setFromMatrixPosition(get(n).matrixWorld);
+const wq = n => get(n).getWorldQuaternion(new THREE.Quaternion());
+const axis = (n, x, y, z) => { const v = new THREE.Vector3(x,y,z).applyQuaternion(wq(n)); return `(${v.x.toFixed(2)}, ${v.y.toFixed(2)}, ${v.z.toFixed(2)})`; };
+console.log('root      pos', wp('root').toArray().map(v=>v.toFixed(2)).join(', '), ' quat', wq('root').toArray().map(v=>v.toFixed(2)).join(', '));
+console.log('pelvis    pos', wp('pelvis').toArray().map(v=>v.toFixed(2)).join(', '));
+console.log('pelvis  +X', axis('pelvis',1,0,0), ' +Y', axis('pelvis',0,1,0), ' +Z', axis('pelvis',0,0,1));
+console.log('head - pelvis =', wp('head').sub(wp('pelvis')).toArray().map(v=>v.toFixed(2)).join(', '));
+console.log('thigh_l - pelvis =', wp('thigh_l').sub(wp('pelvis')).toArray().map(v=>v.toFixed(2)).join(', '));
+console.log('thigh_r - pelvis =', wp('thigh_r').sub(wp('pelvis')).toArray().map(v=>v.toFixed(2)).join(', '));
+console.log('clav_l - spine_03 =', wp('clavicle_l').sub(wp('spine_03')).toArray().map(v=>v.toFixed(2)).join(', '));
+console.log('clav_r - spine_03 =', wp('clavicle_r').sub(wp('spine_03')).toArray().map(v=>v.toFixed(2)).join(', '));
+console.log('spine_01 - pelvis =', wp('spine_01').sub(wp('pelvis')).toArray().map(v=>v.toFixed(2)).join(', '));
+console.log('ball_l - foot_l =', wp('ball_l').sub(wp('foot_l')).toArray().map(v=>v.toFixed(2)).join(', '));
+console.log('foot_l - calf_l =', wp('foot_l').sub(wp('calf_l')).toArray().map(v=>v.toFixed(2)).join(', '));
+console.log('hand_l - lowerarm_l =', wp('hand_l').sub(wp('lowerarm_l')).toArray().map(v=>v.toFixed(2)).join(', '));
+console.log('upperarm_l - clav_l =', wp('upperarm_l').sub(wp('clavicle_l')).toArray().map(v=>v.toFixed(2)).join(', '));
+await new Promise(r => server.close(r));

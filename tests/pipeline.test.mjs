@@ -50,6 +50,7 @@ export async function bootWorld(glTFLoader) {
   const db = new AnimationDatabase();
   await db.load();
   db.retarget(fredScene);
+  if (db.clips.size === 0) throw new Error('no clips retargeted');
 
   const environment = new Environment(scene);
   const mixer = new THREE.AnimationMixer(fredScene);
@@ -68,8 +69,7 @@ export async function bootWorld(glTFLoader) {
   const upperLayer = new AnimationLayer(mixer, upperBodyMask(rig), { name: 'upper-body', defaultBlend: 0.7 });
   const director = new IdleDirector({ db, layer: upperLayer, locomotion: mm, look, armPoses });
 
-  mm.forceTransition('idle', 0.01);
-
+  let gameT = 0;
   const forward = new THREE.Vector3();
   const right = new THREE.Vector3();
   const camFwd = new THREE.Vector3();
@@ -80,17 +80,19 @@ export async function bootWorld(glTFLoader) {
     const cameraYaw = ctx.cameraYaw ?? 0;
     const c = controller.update(DT, cameraYaw);
     const { localVel, speed, jumpPhase } = c;
+    gameT += DT;
 
-    if (jumpPhase === 'begin') mm.forceTransition('jump_begin', 0.12);
-    else if (jumpPhase === 'air') mm.forceTransition('jump_fall', 0.15);
-    else if (jumpPhase === 'land') mm.forceTransition('jump_land', 0.10);
-    else mm.update(DT, localVel, speed);
+    mm.setCrouch(c.crouching);
+    mm.setJumpPhase(jumpPhase, { speed, localVel, airTime: c.airTime });
+    mm.update(DT, localVel, speed, c.crouching);
 
     director.update(DT, {
       speed,
       idleTime: c.idleTime,
       onGround: controller.onGround,
+      crouch: c.crouching,
       wallEngaged: wallHands.engaged,
+      now: gameT,
     });
 
     upperLayer.update(DT);
@@ -150,35 +152,54 @@ export function registerPipeline(loaderFactory) {
     it('loads Fred, the clip library and retargets every clip', async () => {
       world = await bootWorld(glTFLoader);
       assertGt(world.bones.length, 20, `${world.bones.length} bones`);
-      assertGt(world.db.clips.size, 25, `${world.db.clips.size} clips loaded`);
-      assert(!!world.db.get('talk'), 'the social take is in the library');
+      assertGt(world.db.clips.size, 100, `${world.db.clips.size} clips loaded`);
+      assert(!!world.db.get('idle_break_01'), 'the idle breaks are in the library');
+      assert(!!world.db.get('jump_fall'), 'the airborne clip is in the library');
+      assert(!!world.db.get('crouch_idle_loop'), 'the crouched idle is in the library');
 
-      // Retargeted clips are bound to Fred's bone names, not the source rig's.
-      const idle = world.db.get('idle');
-      assert(idle.tracks.length === 20, `${idle.tracks.length} tracks`);
+      // Retargeted clips are bound to Fred's bone names, not the source rig's,
+      // and the locomotion clips carry the baked pelvis-bob position track.
+      const idle = world.db.get('idle_loop');
+      assert(idle.tracks.length === 21, `${idle.tracks.length} tracks (20 joints + pelvis position)`);
       assert(idle.tracks.every(t => t.name.startsWith('SKEL_')), 'bound to SKEL_* bones');
-      assertClose(idle.duration, 2.7, 0.2, 'idle duration preserved');
+      assert(idle.tracks.some(t => t.name === 'SKEL_Pelvis_00.position'), 'pelvis bob baked');
+      assertClose(idle.duration, 10.0, 0.3, 'idle duration preserved');
+
+      // A crouched clip bakes its depth as a *lowering*, never a rise.
+      const crouch = world.db.get('transition_stand_to_crouch');
+      const pos = crouch.tracks.find(t => t.name === 'SKEL_Pelvis_00.position');
+      const bindY = idle.tracks.find(t => t.name === 'SKEL_Pelvis_00.position').values[1];
+      const minY = Math.min(...Array.from(pos.values).filter((_, i) => i % 3 === 1));
+      assertLt(minY, bindY - 0.3, `crouch lowers the pelvis (min ${minY.toFixed(3)} vs bind ${bindY.toFixed(3)})`);
+      const maxY = Math.max(...Array.from(pos.values).filter((_, i) => i % 3 === 1));
+      assertLt(maxY, bindY + 1e-6, `crouch never rises (max ${maxY.toFixed(3)})`);
     });
 
-    it('ten seconds of standing still: legs idle, upper body finds something to do', async () => {
+    it('thirty seconds of standing still: legs idle, upper body finds something to do', async () => {
+      // The break takes only offer once the character is fully settled
+      // (settle = 1 at 12 s), so the window has to be longer than that.
       const seen = new Set();
       let sawUpperLayer = false;
+      let sawBreakOnLayer = false;
       let sawCrossed = 0;
 
-      for (let i = 0; i < 600; i++) {
+      for (let i = 0; i < 1800; i++) {
         world.step();
         seen.add(world.director.current);
-        if (world.upperLayer.currentKey) sawUpperLayer = true;
+        const k = world.upperLayer.currentKey;
+        if (k) sawUpperLayer = true;
+        if (k && /^(idle_break|crouch_idle_break)/.test(k)) sawBreakOnLayer = true;
         sawCrossed = Math.max(sawCrossed, world.director.crossed.value);
         if (i % 60 === 0) assertRigFinite(world.fredScene, `idle frame ${i}`);
       }
 
       assert(seen.has('rest'), 'started at rest');
-      assert(seen.has('talk') || seen.has('cross'), `idle behaviours ran: ${[...seen].join(', ')}`);
-      assert(sawUpperLayer, 'the talk clip reached the upper-body layer');
+      assert(seen.has('break') || seen.has('cross'), `idle behaviours ran: ${[...seen].join(', ')}`);
+      assert(sawUpperLayer, 'an idle behaviour reached the upper-body layer');
+      assert(sawBreakOnLayer, 'an idle break clip played on the masked layer');
       assertGt(sawCrossed, 0.5, 'arms folded at some point');
-      assert(world.controller.idleTime > 9, `idle clock ran (${world.controller.idleTime.toFixed(1)}s)`);
-      assert(['idle', 'idle2'].includes(world.mm.getCurrentKey()), `legs stayed idle, got ${world.mm.getCurrentKey()}`);
+      assert(world.controller.idleTime > 29, `idle clock ran (${world.controller.idleTime.toFixed(1)}s)`);
+      assert(world.mm.getCurrentKey() === 'idle_loop', `legs stayed idle, got ${world.mm.getCurrentKey()}`);
     });
 
     it('movement cancels the idle behaviour and picks a locomotion clip', async () => {
@@ -249,6 +270,75 @@ export function registerPipeline(loaderFactory) {
       assert(phases.has('none'), 'recovered');
       assertLt(deepest, -0.02, `pelvis dipped on landing (deepest ${deepest.toFixed(3)} m)`);
       assertRigFinite(world.fredScene, 'jump');
+    });
+
+    it('crouch enters and leaves through the measured transition, at capped speed', async () => {
+      world.character.position.set(0, world.groundOffset, 0);
+      world.controller.velocity.set(0, 0, 0);
+      world.controller.crouching = false;
+      world.controller.idleTime = 0;
+      world.director.enabled = false;   // keep the upper body out of the picture
+
+      world.controller._requestCrouchToggle();   // grounded → immediate
+      for (let i = 0; i < 150; i++) world.step();
+      assert(world.controller.crouching, 'crouched');
+      assert(world.mm.getCurrentKey() === 'crouch_idle_loop',
+        `crouch idle played, got ${world.mm.getCurrentKey()}`);
+
+      world.controller._keys.KeyW = true;
+      let sawCrouchGait = false;
+      let topSpeed = 0;
+      for (let i = 0; i < 150; i++) {
+        world.step();
+        if (/^crouch_/.test(world.mm.getCurrentKey() ?? '')) sawCrouchGait = true;
+        topSpeed = Math.max(topSpeed, Math.hypot(world.controller.velocity.x, world.controller.velocity.z));
+      }
+      delete world.controller._keys.KeyW;
+      assert(sawCrouchGait, 'a crouch gait played while moving');
+      assertLt(topSpeed, 2.3, `crouch speed capped (${topSpeed.toFixed(2)} m/s)`);
+
+      for (let i = 0; i < 60; i++) world.step();
+      world.controller._requestCrouchToggle();
+      for (let i = 0; i < 150; i++) world.step();
+      assert(!world.controller.crouching, 'back to standing');
+      assert(world.mm.getCurrentKey() === 'idle_loop',
+        `standing idle again, got ${world.mm.getCurrentKey()}`);
+      world.director.enabled = true;
+    });
+
+    it('landing selection uses fall height and impact speed', async () => {
+      const pickLand = ctx => {
+        world.mm.setJumpPhase('none', {});
+        world.mm.setJumpPhase('land', ctx);
+        for (let i = 0; i < 20; i++) world.mm.advance(DT);
+        return world.mm.getCurrentKey();
+      };
+      const pickStart = ctx => {
+        world.mm.setJumpPhase('none', {});
+        world.mm.setJumpPhase('begin', ctx);
+        for (let i = 0; i < 20; i++) world.mm.advance(DT);
+        return world.mm.getCurrentKey();
+      };
+      const fwd = new THREE.Vector3(0, 0, 1);
+      const back = new THREE.Vector3(0, 0, -1);
+
+      assert(/^jump_land_roll_/.test(pickLand({ speed: 1, localVel: fwd, airTime: 1.8 })),
+        'a long fall ends in a roll');
+      assert(/^jump_land_stumble_/.test(pickLand({ speed: 6.5, localVel: fwd, airTime: 0.5 })),
+        'a sprint-speed landing stumbles');
+      assert(/^jump_land_walk_light_f_/.test(pickLand({ speed: 2, localVel: fwd, airTime: 0.5 })),
+        'a walking landing is a walk landing');
+      assert(/^jump_land_stand_light_f_/.test(pickLand({ speed: 0.2, localVel: fwd, airTime: 0.5 })),
+        'a standing landing is a stand landing');
+      assert(/^jump_land_.*_b_/.test(pickLand({ speed: 0.2, localVel: back, airTime: 0.5 })),
+        'a backward landing uses the backward take');
+
+      assert(/^jump_start_stand_f_/.test(pickStart({ speed: 0, localVel: fwd })),
+        'a standing start is a standing start');
+      assert(/^jump_start_run_f_/.test(pickStart({ speed: 4, localVel: fwd })),
+        'a running start is a running start');
+      world.mm.setJumpPhase('none', {});
+      for (let i = 0; i < 60; i++) world.step();
     });
 
     it('every system can be switched off without breaking the others', async () => {

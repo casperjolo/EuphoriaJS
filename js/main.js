@@ -227,17 +227,17 @@ async function loadAll() {
     Digit3: ['hands',   () => wallHands.enabled, v => (wallHands.enabled = v)],
     Digit4: ['lean',    () => bodyLean.enabled,  v => (bodyLean.enabled = v)],
   };
+  // Latest controller output, kept here so the debug keys can query with it.
+  let lastQuery = { localVel: new THREE.Vector3(), speed: 0, crouch: false };
   window.addEventListener('keydown', e => {
     if (e.code === 'KeyB' && window._footPlanting) window._footPlanting.debugBones();
+    if (e.code === 'KeyD') mm.dumpCosts(lastQuery.localVel, lastQuery.speed, lastQuery.crouch);
     const t = toggles[e.code];
     if (t) {
       t[2](!t[1]());
       console.log(`[main] ${t[0]} ${t[1]() ? 'on' : 'off'}`);
     }
   });
-
-  // ── Start with idle ────────────────────────────────────────────────────────
-  mm.forceTransition('idle', 0.01);
 
   // ── Scratch vectors (the loop must not allocate) ───────────────────────────
   const forward = new THREE.Vector3();
@@ -247,6 +247,7 @@ async function loadAll() {
 
   // ── State for HUD ──────────────────────────────────────────────────────────
   let frameCount = 0, fpsTime = 0, fps = 0;
+  let gameT = 0;   // monotonic game clock (the director's cooldowns run on it)
 
   // ── Game loop ──────────────────────────────────────────────────────────────
   const clock = new THREE.Clock();
@@ -265,25 +266,29 @@ async function loadAll() {
     // 2. Controller update
     const c = controller.update(dt, cameraYaw);
     const { localVel, speed, jumpPhase } = c;
+    gameT += dt;
 
     // 3. Motion matching — locomotion, then the upper-body layer on top.
     //    Both only decide here; their weights are advanced in step 4, because
     //    the mixer reads them during its own update.
-    if (jumpPhase === 'begin') {
-      mm.forceTransition('jump_begin', 0.12);
-    } else if (jumpPhase === 'air') {
-      mm.forceTransition('jump_fall', 0.15);
-    } else if (jumpPhase === 'land') {
-      mm.forceTransition('jump_land', 0.10);
-    } else {
-      mm.update(dt, localVel, speed);
-    }
+    //
+    //    Crouch and jump phases are one-shots addressed by name (the query is
+    //    suppressed while they own the base layer); everything else is the
+    //    continuous (vx, vz) query, which no-ops during them anyway.
+    mm.setCrouch(c.crouching);
+    mm.setJumpPhase(jumpPhase, { speed, localVel, airTime: c.airTime });
+    mm.update(dt, localVel, speed, c.crouching);
+    lastQuery.localVel.copy(localVel);
+    lastQuery.speed = speed;
+    lastQuery.crouch = c.crouching;
 
     director.update(dt, {
       speed,
       idleTime: c.idleTime,
       onGround: controller.onGround,
+      crouch: c.crouching,
       wallEngaged: wallHands.engaged,
+      now: gameT,
     });
 
     // 4. Advance every blend curve, then the mixer
@@ -359,18 +364,20 @@ async function loadAll() {
     const px = character.position.x.toFixed(1);
     const pz = character.position.z.toFixed(1);
     const off = s => (s ? 'on ' : 'off');
+    const tierName = ['idle', 'walk', 'run', 'sprint', 'crouch'][
+      c.crouching ? 4 : speed < 0.25 ? 0 : speed < 3.4 ? 1 : speed < 6.0 ? 2 : 3];
     hud.innerHTML = [
       `FPS:  ${fps}`,
-      `Legs: ${mm.getCurrentKey() ?? '—'}`,
+      `Legs: ${mm.getCurrentKey() ?? '—'}  ×${mm.getTimeScale().toFixed(2)}`,
       `Arms: ${director.current}${upperLayer.currentKey ? ` (${upperLayer.currentKey})` : ''}`,
       `Gaze: ${look.targetMode}  yaw ${(look.yaw * 57.3).toFixed(0)}°`,
       `Hand: ${wallHands.status()}`,
       `Idle: ${c.idleTime.toFixed(1)}s`,
-      `Spd:  ${sp} m/s   LVel: ${lx} / ${lz}`,
-      `Pos:  ${px}, ${pz}   Jump: ${jumpPhase}   Ground: ${controller.onGround ? 'yes' : 'no'}`,
+      `Spd:  ${sp} m/s   Tier: ${tierName}   LVel: ${lx} / ${lz}`,
+      `Pos:  ${px}, ${pz}   Jump: ${jumpPhase}${c.airTime > 0 ? ` (${c.airTime.toFixed(2)}s)` : ''}   ${c.crouching ? 'CROUCH ' : ''}Ground: ${controller.onGround ? 'yes' : 'no'}`,
       '',
-      'WASD — move   Shift — sprint   Space — jump',
-      'Click — lock mouse   B — dump bones',
+      'WASD — move   Shift — sprint   Space — jump   C — crouch',
+      'Click — lock mouse   B — dump bones   D — dump match costs',
       `1 look ${off(look.enabled)}  2 idle ${off(director.enabled)}  3 hands ${off(wallHands.enabled)}  4 lean ${off(bodyLean.enabled)}`,
     ].join('\n');
   });
