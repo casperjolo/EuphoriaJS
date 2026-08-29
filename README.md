@@ -1,6 +1,8 @@
 # EuphoriaJS
 - NaturalMotion's Euphoria Engine on the Web.
-  <img width="2172" height="724" alt="image" src="https://github.com/user-attachments/assets/54443d67-993d-4250-ab5a-00120184ebd8" />
+
+<img width="2172" height="724" alt="image" src="https://github.com/user-attachments/assets/ef93884c-5337-4433-9c8c-276eec68f5c5" />
+
 
 GTA IV-styled third-person locomotion in Three.js: motion matching, procedural
 two-bone IK, and foot planting over deformable terrain — plus a second animation
